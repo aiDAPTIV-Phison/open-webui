@@ -125,6 +125,13 @@ def clean_timing_info_from_content(content):
     content = re.sub(r'^Time to first token: \d+\.?\d* s\s*\n?', '', content, flags=re.MULTILINE)
     content = re.sub(r'\nTime to first token: \d+\.?\d* s\s*\n?', '\n', content, flags=re.MULTILINE)
 
+    content = re.sub(r'^Time to first token: \d+\.?\d* s\s*\n?', '', content, flags=re.MULTILINE)
+    content = re.sub(r'\nTime to first token: \d+\.?\d* s\s*\n?', '\n', content, flags=re.MULTILINE)
+    # 移除 emoji 版本的 Time to first token 行
+    # 標題格式: ### 🟢Time to first token: X.XX s
+    content = re.sub(r'^###\s*🟢\s*Time to first token: \d+\.?\d* s\s*\n?', '', content, flags=re.MULTILINE)
+    content = re.sub(r'\n###\s*🟢\s*Time to first token: \d+\.?\d* s\s*\n?', '\n', content, flags=re.MULTILINE)
+
     # 移除 Total Time 行，保留原有的換行結構
     content = re.sub(r'^Total Time: \d+\.?\d* s\s*\n?', '', content, flags=re.MULTILINE)
     content = re.sub(r'\nTotal Time: \d+\.?\d* s\s*\n?', '\n', content, flags=re.MULTILINE)
@@ -2222,7 +2229,7 @@ async def process_chat_response(
 
                                             # 只在未添加過時才添加 TTFT 到串流（忽略 depth，因為 depth 可能在 tool calls 後重置）
                                             if not ttft_added_to_stream:
-                                                value = f"Time to first token: {ttft_value} s\n{value}"
+                                                value = f"### 🟢Time to first token: {ttft_value} s\n{value}"
                                                 ttft_added_to_stream = True
                                                 log.info(f"[TTFT] Added TTFT to stream at depth={current_depth}")
                                             else:
@@ -2760,8 +2767,12 @@ async def process_chat_response(
                             break
 
                     if first_text_block:
-                        if not first_text_block["content"].startswith("Time to first token:"):
-                            first_text_block["content"] = f"Time to first token: {ttft_value} s\n{first_text_block['content']}"
+                        already_has_ttft = (
+                            first_text_block["content"].startswith("Time to first token:")
+                            or first_text_block["content"].startswith("### 🟢Time to first token:")
+                        )
+                        if not already_has_ttft:
+                            first_text_block["content"] = f"### 🟢Time to first token: {ttft_value} s\n{first_text_block['content']}"
                             ttft_added_to_final = True
                             log.info(f"[TTFT] Added TTFT to final content (was not in stream)")
                         else:

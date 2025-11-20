@@ -93,14 +93,30 @@ def call_km_rag_api(collection_name: str, question: str, k: int) -> Optional[dic
 
             raw_path = result.get("file_path", "KM RAG Result").strip()  # 先去除前後空格
 
-            # 如果是相對路徑且以 ./ 開頭，需要判斷
-            if raw_path.startswith('./') or raw_path.startswith('.\\'):
-                # 如果已經包含完整路徑資訊，可能需要從相對路徑中提取實際路徑
-                # 或者根據實際 API 返回的格式處理
-                actual_path = Path(raw_path)
-            else:
-                actual_path = Path(raw_path)
-
+            # 確保路徑是相對路徑，移除各種前導分隔符
+            # 處理 ./path, .\\path, \\path, /path, //path 等情況
+            # 使用 Path 來標準化路徑，確保跨平台兼容性
+            
+            # 統一將反斜線轉換為正斜線，避免跨平台問題
+            raw_path = raw_path.replace('\\', '/')
+            
+            # 移除前導分隔符
+            while raw_path.startswith(('./', '//', '/')):
+                if raw_path.startswith('./'):
+                    raw_path = raw_path[2:]
+                elif raw_path.startswith('//'):
+                    raw_path = raw_path[2:]
+                elif raw_path.startswith('/'):
+                    raw_path = raw_path[1:]
+            
+            # 使用 Path 標準化路徑（自動處理不同平台的分隔符）
+            actual_path = Path(raw_path)
+            
+            # 如果仍然是絕對路徑，轉換為相對路徑（移除根路徑）
+            if actual_path.is_absolute():
+                # 取得路徑的各部分，排除根部分
+                actual_path = Path(*actual_path.parts[1:]) if len(actual_path.parts) > 1 else actual_path
+            
             file_path = Path(KM_RESULT_DIR) / actual_path
             try:
                 # 讀取file_path指向的txt檔內容

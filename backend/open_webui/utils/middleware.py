@@ -1617,6 +1617,15 @@ async def process_chat_response(
             total_time_added = False  # 追蹤是否已添加 Total Time
             stream_handler_depth = 0  # 追蹤 stream_body_handler 的遞歸深度
 
+            # 追蹤 decode throughput 相關的 metrics
+            metrics_info = {}  # 儲存從 API 返回的 metrics 信息（first_token_time, last_token_time）
+            usage_info = {}  # 儲存從 API 返回的 usage 信息（completion_tokens, prompt_tokens）
+            
+            # 備用方案：自己追蹤 token timing（如果 API 不提供）
+            first_content_token_time = None  # 第一個實際內容 token 的時間
+            last_content_token_time = None  # 最後一個內容 token 的時間
+            total_output_tokens = 0  # 追蹤輸出的 token 數量（粗略估計）
+
             log.info(f"[TTFT] Response handler started at {response_handler_start_time} (request started at {start_time}, elapsed: {round(response_handler_start_time - start_time, 3)}s)")
 
             def serialize_content_blocks(content_blocks, raw=False):
@@ -2044,6 +2053,13 @@ async def process_chat_response(
                     nonlocal total_time_added
                     nonlocal stream_handler_depth
 
+                    # 訪問 decode throughput 相關變量
+                    nonlocal metrics_info
+                    nonlocal usage_info
+                    nonlocal first_content_token_time
+                    nonlocal last_content_token_time
+                    nonlocal total_output_tokens
+
                     # 進入函數時增加深度
                     stream_handler_depth += 1
                     current_depth = stream_handler_depth
@@ -2098,6 +2114,39 @@ async def process_chat_response(
                             )
 
                             if data:
+                                # 收集 usage 和 timing metrics（在任何地方都嘗試收集）
+                                usage = data.get("usage", {})
+                                if usage:
+                                    usage_info.update(usage)
+                                    log.info(f"[METRICS] ✓ Collected usage at line #{line_count}: {usage}")
+                                
+                                # 收集 timing metrics（從頂層）
+                                timing_found = False
+                                if "first_token_time" in data:
+                                    metrics_info["first_token_time"] = data.get("first_token_time")
+                                    log.info(f"[METRICS] ✓ Collected first_token_time at line #{line_count}: {data.get('first_token_time')}")
+                                    timing_found = True
+                                if "last_token_time" in data:
+                                    metrics_info["last_token_time"] = data.get("last_token_time")
+                                    log.info(f"[METRICS] ✓ Collected last_token_time at line #{line_count}: {data.get('last_token_time')}")
+                                    timing_found = True
+                                
+                                # 也嘗試從 metrics 子字段讀取
+                                metrics = data.get("metrics", {})
+                                if metrics:
+                                    if "first_token_time" in metrics:
+                                        metrics_info["first_token_time"] = metrics.get("first_token_time")
+                                        log.info(f"[METRICS] ✓ Collected first_token_time from metrics at line #{line_count}: {metrics.get('first_token_time')}")
+                                        timing_found = True
+                                    if "last_token_time" in metrics:
+                                        metrics_info["last_token_time"] = metrics.get("last_token_time")
+                                        log.info(f"[METRICS] ✓ Collected last_token_time from metrics at line #{line_count}: {metrics.get('last_token_time')}")
+                                        timing_found = True
+                                
+                                # Debug: 如果是前5個chunk或者找到重要數據，記錄完整的 keys
+                                if line_count <= 5 or usage or timing_found:
+                                    log.debug(f"[METRICS DEBUG] Chunk #{line_count} keys: {data.keys()}")
+
                                 if "event" in data:
                                     await event_emitter(data.get("event", {}))
 
@@ -2123,6 +2172,7 @@ async def process_chat_response(
                                                     },
                                                 }
                                             )
+                                        # usage 已經在前面收集了，這裡只需要發送 event
                                         usage = data.get("usage", {})
                                         if usage:
                                             await event_emitter(
@@ -2204,10 +2254,16 @@ async def process_chat_response(
                                         or delta.get("thinking")
                                     )
                                     if reasoning_content:
+                                        current_time = time.time()
                                         # 如果這是第一個 token（reasoning），記錄 TTFT
                                         if not first_token_received:
-                                            ttft_value = round(time.time() - start_time, 2)
+                                            ttft_value = round(current_time - start_time, 2)
                                             first_token_received = True
+                                            first_content_token_time = current_time
+                                        
+                                        # 追蹤 reasoning token
+                                        last_content_token_time = current_time
+                                        total_output_tokens += 1
 
                                         if (
                                             not content_blocks
@@ -2236,7 +2292,8 @@ async def process_chat_response(
                                         }
 
                                     if value:
-                                        current_elapsed = round(time.time() - start_time, 3)
+                                        current_time = time.time()
+                                        current_elapsed = round(current_time - start_time, 3)
                                         # 如果這是第一個 token（content），記錄 TTFT
                                         # 過濾掉標籤本身（如 <think>, </think> 等）
                                         # 只有當收到實際的內容時才計算 TTFT
@@ -2253,8 +2310,9 @@ async def process_chat_response(
                                         # 確保 TTFT 只計算和添加一次
                                         if not first_token_received and stripped_value and len(stripped_value) > 0 and not is_tag_only:
                                             # 計算 TTFT（只會發生一次，因為之後 first_token_received = True）
-                                            ttft_value = round(time.time() - start_time, 2)
+                                            ttft_value = round(current_time - start_time, 2)
                                             first_token_received = True
+                                            first_content_token_time = current_time  # 記錄第一個 content token 時間
                                             log.debug(f"[TTFT] First token (content) received, TTFT={ttft_value}s, depth={current_depth}, content_length={len(value)}, stripped_length={len(value.strip())}, content='{stripped_value[:30]}'")
 
                                             # 只在未添加過時才添加 TTFT 到串流（忽略 depth，因為 depth 可能在 tool calls 後重置）
@@ -2264,6 +2322,11 @@ async def process_chat_response(
                                                 log.debug(f"[TTFT] Added TTFT to stream at depth={current_depth}")
                                             else:
                                                 log.debug(f"[TTFT] Skipped adding TTFT to stream (already_added={ttft_added_to_stream}, depth={current_depth})")
+                                        
+                                        # 追蹤每個 content token（用於備用 decode_tp 計算）
+                                        if stripped_value and not is_tag_only:
+                                            last_content_token_time = current_time
+                                            total_output_tokens += 1  # 粗略估計：每個 delta 算 1 個 token
 
                                         if (
                                             content_blocks
@@ -2410,9 +2473,10 @@ async def process_chat_response(
                     if response.background:
                         await response.background()
 
-                    # 離開函數時減少深度
+                    # 離開函數時減少深度並記錄統計
                     stream_handler_depth -= 1
                     log.debug(f"[TTFT] Stream body handler exited, new depth={stream_handler_depth}")
+                    log.info(f"[METRICS] Stream completed - Total chunks: {line_count}, Collected metrics: {metrics_info}, Collected usage: {usage_info}")
 
                 await stream_body_handler(response, form_data)
 
@@ -2773,6 +2837,53 @@ async def process_chat_response(
                 # 計算總處理時間
                 total_time = round(time.time() - start_time, 2)
 
+                # 計算 decode throughput
+                decode_tp_text = ""
+                log.info(f"[METRICS] Final collected data - API metrics: {metrics_info}, API usage: {usage_info}")
+                log.info(f"[METRICS] Self-tracked data - first_time: {first_content_token_time}, last_time: {last_content_token_time}, total_tokens: {total_output_tokens}")
+                
+                # 方案 1: 嘗試使用 API 提供的 metrics
+                if metrics_info and usage_info:
+                    try:
+                        first_token_time = metrics_info.get("first_token_time")
+                        last_token_time = metrics_info.get("last_token_time")
+                        
+                        if first_token_time is not None and last_token_time is not None:
+                            decode_time = last_token_time - first_token_time
+                            output_tokens_num = usage_info.get("completion_tokens", 0)
+                            input_tokens_num = usage_info.get("prompt_tokens", 0)
+                            
+                            if decode_time > 0 and output_tokens_num > 0:
+                                decode_tp = round(output_tokens_num / decode_time, 2)
+                                decode_tp_text = f"{decode_tp} tokens/s"
+                                log.info(f"[METRICS] ✓ Decode throughput from API - decode_time={round(decode_time, 2)}s, output_tokens={output_tokens_num}, input_tokens={input_tokens_num}, decode_tp={decode_tp} tokens/s")
+                            else:
+                                log.warning(f"[METRICS] Cannot calculate decode_tp from API - decode_time={decode_time}, output_tokens={output_tokens_num}")
+                        else:
+                            log.warning(f"[METRICS] Missing token time in API metrics: first_token_time={first_token_time}, last_token_time={last_token_time}")
+                    except Exception as e:
+                        log.error(f"[METRICS] Error calculating decode throughput from API: {e}")
+                
+                # 方案 2: 如果 API 沒提供，使用我們自己追蹤的數據（備用方案）
+                if not decode_tp_text and first_content_token_time is not None and last_content_token_time is not None:
+                    try:
+                        decode_time = last_content_token_time - first_content_token_time
+                        
+                        # 優先使用 API usage，否則使用我們的估計
+                        output_tokens_num = usage_info.get("completion_tokens", 0) if usage_info else total_output_tokens
+                        
+                        if decode_time > 0 and output_tokens_num > 0:
+                            decode_tp = round(output_tokens_num / decode_time, 2)
+                            decode_tp_text = f"{decode_tp} tokens/s"
+                            log.info(f"[METRICS] ✓ Decode throughput from self-tracking (fallback) - decode_time={round(decode_time, 2)}s, output_tokens={output_tokens_num}, decode_tp={decode_tp} tokens/s")
+                        else:
+                            log.warning(f"[METRICS] Cannot calculate decode_tp from self-tracking - decode_time={decode_time}, output_tokens={output_tokens_num}")
+                    except Exception as e:
+                        log.error(f"[METRICS] Error calculating decode throughput from self-tracking: {e}")
+                
+                if not decode_tp_text:
+                    log.warning(f"[METRICS] ✗ Could not calculate decode_tp - insufficient data from both API and self-tracking")
+
                 # 記錄最終統計
                 log.debug(f"[TTFT] Response completed - TTFT={ttft_value}s, Total Time={total_time}s, stream_handler_depth={stream_handler_depth}")
                 # if raw_data_dump:
@@ -2807,9 +2918,9 @@ async def process_chat_response(
                         else:
                             ttft_added_to_final = True
 
-                # 只添加一次 Total Time
+                # 只添加一次 Total Time 和 Decode TP
                 if not total_time_added:
-                    content_blocks[-1]['content'] += f"\nTotal Time: {total_time} s"
+                    content_blocks[-1]['content'] += f"\nTotal Time: {total_time} s\nToken Rate: {decode_tp_text}"
                     total_time_added = True
                 data = {
                     "done": True,

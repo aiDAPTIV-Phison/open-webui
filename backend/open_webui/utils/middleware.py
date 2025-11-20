@@ -1852,10 +1852,12 @@ async def process_chat_response(
                             **event,
                         },
                     )
+                now = time.time()
 
                 async def stream_body_handler(response, form_data):
                     nonlocal content
                     nonlocal content_blocks
+                    nonlocal now
 
                     response_tool_calls = []
 
@@ -1867,7 +1869,9 @@ async def process_chat_response(
                             or 1
                         ),
                     )
-
+                    
+                                        
+                    first = True
                     async for line in response.body_iterator:
                         line = line.decode("utf-8") if isinstance(line, bytes) else line
                         data = line
@@ -2028,6 +2032,9 @@ async def process_chat_response(
                                         }
 
                                     if value:
+                                        if first and value.strip():
+                                            value = f"Time to first token: {round(time.time()-now,2)} s\n{value}"
+                                            first = False
                                         if (
                                             content_blocks
                                             and content_blocks[-1]["type"]
@@ -2521,6 +2528,7 @@ async def process_chat_response(
                             break
 
                 title = Chats.get_chat_title_by_id(metadata["chat_id"])
+                content_blocks[-1]['content'] += f"\nTotal Time: {round(time.time()-now,2)} s"
                 data = {
                     "done": True,
                     "content": serialize_content_blocks(content_blocks),
@@ -2603,7 +2611,6 @@ async def process_chat_response(
 
                 if event:
                     yield wrap_item(json.dumps(event))
-
             async for data in original_generator:
                 data, _ = await process_filter_functions(
                     request=request,
@@ -2612,7 +2619,6 @@ async def process_chat_response(
                     form_data=data,
                     extra_params=extra_params,
                 )
-
                 if data:
                     yield data
 

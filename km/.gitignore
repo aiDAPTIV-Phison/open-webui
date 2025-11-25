@@ -1,0 +1,11 @@
+# __pycache__
+__pycache__
+
+# directories
+logs/*
+data/*
+test_output/*
+tmp/*
+venv/*
+test/data/*.pdf
+test/data/*.json

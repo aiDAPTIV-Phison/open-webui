@@ -37,6 +37,8 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter, TokenTextSpl
 from langchain_text_splitters import MarkdownHeaderTextSplitter
 from langchain_core.documents import Document
 
+from open_webui.retrieval.text_splitter import APITokenTextSplitter
+
 from open_webui.models.files import FileModel, Files
 from open_webui.models.knowledge import Knowledges
 from open_webui.storage.provider import Storage
@@ -1210,6 +1212,103 @@ def save_docs_to_vector_db(
                 chunk_overlap=request.app.state.config.CHUNK_OVERLAP,
                 add_start_index=True,
             )
+            docs = text_splitter.split_documents(docs)
+        elif request.app.state.config.TEXT_SPLITTER == "api_token":
+            log.info("Using API-based token text splitter (LlamaCPP/VLLM compatible)")
+            
+            # Get API configuration for tokenizer
+            # Use OPENAI_API_BASE_URLS as the default endpoint (compatible with LlamaCPP/VLLM)
+            api_base_url = None
+            api_key = None
+            model_name = None
+            
+            # Helper function to safely get value from config (handles both PersistentConfig and direct values)
+            def get_config_value(config_obj):
+                if config_obj is None:
+                    return None
+                # If it's a PersistentConfig object, access .value
+                if hasattr(config_obj, 'value'):
+                    return config_obj.value
+                # Otherwise return the object directly (it's already the value)
+                return config_obj
+            
+            # Helper function to get model name from API endpoint
+            def get_model_from_api(base_url: str, api_key: Optional[str] = None) -> Optional[str]:
+                """Query /v1/models endpoint to get the available model"""
+                try:
+                    headers = {"Content-Type": "application/json"}
+                    if api_key:
+                        headers["Authorization"] = f"Bearer {api_key}"
+                    
+                    with httpx.Client(timeout=10.0) as client:
+                        response = client.get(f"{base_url}/models", headers=headers)
+                        if response.status_code == 200:
+                            data = response.json()
+                            # OpenAI-compatible format: {"data": [{"id": "model-name"}, ...]}
+                            if "data" in data and len(data["data"]) > 0:
+                                model_id = data["data"][0].get("id")
+                                log.info(f"Auto-detected model from API: {model_id}")
+                                return model_id
+                except Exception as e:
+                    log.debug(f"Failed to get model from API: {e}")
+                return None
+            
+            # Try to get configuration from app state
+            if hasattr(request.app.state.config, 'OPENAI_API_BASE_URLS'):
+                openai_urls = get_config_value(request.app.state.config.OPENAI_API_BASE_URLS)
+                if openai_urls and len(openai_urls) > 0:
+                    api_base_url = openai_urls[0]
+                    
+                    if hasattr(request.app.state.config, 'OPENAI_API_KEYS'):
+                        openai_keys = get_config_value(request.app.state.config.OPENAI_API_KEYS)
+                        if openai_keys and len(openai_keys) > 0:
+                            api_key = openai_keys[0]
+            
+            # Fallback to OLLAMA if OPENAI is not configured
+            if not api_base_url and hasattr(request.app.state.config, 'OLLAMA_BASE_URLS'):
+                ollama_urls = get_config_value(request.app.state.config.OLLAMA_BASE_URLS)
+                if ollama_urls and len(ollama_urls) > 0:
+                    base_url = ollama_urls[0]
+                    # Add /v1 suffix if not present for OpenAI compatibility
+                    api_base_url = f"{base_url}/v1" if not base_url.endswith('/v1') else base_url
+            
+            # Try to get model name from API endpoint (preferred method)
+            if api_base_url:
+                model_name = get_model_from_api(api_base_url, api_key)
+            
+            # Fallback 1: Try TASK_MODEL config
+            if not model_name and hasattr(request.app.state.config, 'TASK_MODEL'):
+                task_model = get_config_value(request.app.state.config.TASK_MODEL)
+                if task_model:
+                    model_name = task_model
+                    log.info(f"Using model from TASK_MODEL config: {model_name}")
+            
+            # Fallback 2: Try to get first available model from Open WebUI's model list
+            if not model_name:
+                if hasattr(request.app.state, 'MODELS') and request.app.state.MODELS:
+                    model_name = list(request.app.state.MODELS.keys())[0]
+                    log.info(f"Using first available model from Open WebUI: {model_name}")
+            if not api_base_url or not model_name:
+                log.error("API token splitter requires API base URL and model name. Falling back to character splitter.")
+                text_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=request.app.state.config.CHUNK_SIZE,
+                    chunk_overlap=request.app.state.config.CHUNK_OVERLAP,
+                    add_start_index=True,
+                )
+            else:
+                log.info(f"Using API token splitter with endpoint: {api_base_url}, model: {model_name}")
+                text_splitter = APITokenTextSplitter(
+                    api_base_url=api_base_url,
+                    model_name=model_name,
+                    chunk_size=request.app.state.config.CHUNK_SIZE,
+                    chunk_overlap=request.app.state.config.CHUNK_OVERLAP,
+                    api_key=api_key,
+                    timeout=600,
+                    rag_template_str=request.app.state.config.RAG_TEMPLATE,
+                    prefill_query="Please understand this content",
+                    enable_kv_cache_prefill = True,
+                )
+            
             docs = text_splitter.split_documents(docs)
         elif request.app.state.config.TEXT_SPLITTER == "markdown_header":
             log.info("Using markdown header text splitter")

@@ -1074,6 +1074,8 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         # 當 RAG_SELF_KM 為 True 時，只提取純文字內容，不包含 <source> 標籤
         if RAG_SELF_KM:
             # Agent Builder 格式：只包含純文字內容，用換行符分隔
+            relevance_source_index, _ = max(enumerate(sources), key=lambda x: x[1].get("distances", [0])[0])
+            sources = [sources[relevance_source_index]]
             for source in sources:
                 is_tool_result = source.get("tool_result", False)
 
